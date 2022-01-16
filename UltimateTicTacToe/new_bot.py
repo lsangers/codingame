@@ -5,6 +5,7 @@ import datetime
 from functools import lru_cache
 from math import log
 from random import randrange, shuffle
+import sys
 
 RAND_INDEX = 0
 RANDOM_MOVES = [
@@ -306,8 +307,8 @@ class MonteCarloNode(ABC):
         self._utc = 0
         self.parent = parent
         self.unvisited_actions = []
+        self.sorted_actions = []
         self.children = {}
-        self._best_child = None
 
     @property
     def utc(self) -> float:
@@ -316,15 +317,6 @@ class MonteCarloNode(ABC):
             self._last_utc_calc_visit_count = self.visited_count
             self._utc = calculate_utc(self.score, self.visited_count, self.parent.visited_count)
         return self._utc
-
-    @property
-    def best_child(self) -> MonteCarloNode:
-        """Select the node with currently the highest utc value."""
-        if self._best_child is None or self._last_child_calc_visit_count < self.visited_count:
-            self._last_child_calc_visit_count = self.visited_count
-            self._best_child = \
-                self.children[max(self.children, key=lambda key: self.children[key].utc)]
-        return self._best_child
 
     @property
     @abstractmethod
@@ -345,8 +337,9 @@ class MonteCarloNode(ABC):
             shuffle(self.unvisited_actions)
 
         if self.unvisited_actions:
-            return self.children[self.unvisited_actions.pop()]
-        return self.best_child.select_leaf()
+            self.sorted_actions.insert(0, (0, self.unvisited_actions.pop()))
+            return self.children[self.sorted_actions[0][1]]
+        return self.children[self.sorted_actions[0][1]].select_leaf()
 
     @abstractmethod
     def expand(self):
@@ -363,20 +356,35 @@ class MonteCarloNode(ABC):
         """
         self.visited_count += 1
         if winning:
-            self.score += 20 + taken_boards
+            self.score += (20 + taken_boards)
         else:
-            self.score -= 20 + taken_boards
+            self.score -= (20 + taken_boards)
         if self.parent:
             self.parent.backpropagate(not winning, taken_boards)
+            if self.sorted_actions:
+                self.update_sorted_actions()
+
+    def update_sorted_actions(self):
+        """Update the sorted list of actions"""
+        utc = self.utc
+        tmp_move = self.sorted_actions[0][1]
+        for pos in range(1, len(self.sorted_actions)):
+            if self.sorted_actions[pos][0] > utc:
+                self.sorted_actions[pos-1] = self.sorted_actions[pos]
+            else:
+                if pos > 1:
+                    self.sorted_actions[pos-1] = (utc, tmp_move)
+                break
+
 
     def run(self, run_time: float) -> None:
         """Run simulations until we run out of run_time"""
-        # count = 0
+        count = 0
         begin = datetime.datetime.now()
         while (datetime.datetime.now() - begin).total_seconds() < run_time:
             self.select_leaf().simulate()
-        #     count += 1
-        # print(str(count), file=sys.stderr, flush = True)
+            count += 1
+        print(str(count), file=sys.stderr, flush = True)
 
 
 class UltimateBoard(MonteCarloNode):
@@ -494,7 +502,7 @@ def main():
     else:
         root = UltimateBoard(False, STRING_TO_ACTION[opponent], None)
         root.run(.99)
-        root = root.best_child
+        root = root.children[root.sorted_actions[0][1]]
         root.parent = None
         root.print_move()
 
@@ -520,7 +528,7 @@ def main():
 
         # root = root.children[STRING_TO_ACTION[opponent]]
         root.run(.09)
-        root = root.best_child
+        root = root.children[root.sorted_actions[0][1]]
         root.parent = None
         root.print_move()
 
