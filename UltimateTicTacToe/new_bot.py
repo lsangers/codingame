@@ -4,9 +4,20 @@ from abc import ABC, abstractmethod
 import datetime
 from functools import lru_cache
 from math import log
-from random import choice, shuffle
-import sys
-import numpy as np
+from random import randrange, shuffle
+
+RAND_INDEX = 0
+RANDOM_MOVES = [
+    randrange(0, 1000) for _ in range(1000)
+]
+def get_randomint(max_val):
+    global RAND_INDEX
+    res = (RANDOM_MOVES[RAND_INDEX])%max_val
+    RAND_INDEX += 1
+    if RAND_INDEX > 999:
+        shuffle(RANDOM_MOVES)
+        RAND_INDEX = 0
+    return res
 
 MOVES = [
     0b000000001,
@@ -235,37 +246,42 @@ STRING_TO_ACTION = {
     "8 7": (8, 0b000000010),
     "8 8": (8, 0b000000001),
 }
+@lru_cache
+def won(board):
+    """Returns lambda to determine win."""
+    return lambda move: not move & board
 VALID_ACTIONS = {
-    board: list(filter(lambda move: not(move & board), MOVES))
-    for board in range(0b000000001, 0b1000000000)
+    board: list(filter(won(board), MOVES))
+    for board in range(0b000000000, 0b1000000000)
 }
-
-@lru_cache
-def get_valid_actions(board: int) -> list[int]:
-    """List of valid moves on this board."""
-    return list(filter(lambda move: not(move & board), MOVES))
-
-@lru_cache
-def has_won(player_state: int) -> bool:
-    """Returns whether the player state is a win."""
-    return any(map(lambda win: (win & player_state) == win, WINS))
-
-@lru_cache
-def is_terminal(player_1: int, player_2: int) -> bool:
-    """Returns whether this state is terminal."""
-    return has_won(player_1) \
-            or has_won(player_2) \
-            or (player_1 | player_2) == 0b111111111
-
 @lru_cache
 def to_big(index):
     """Returns lambda to translate small to big move."""
     return lambda action: (index, action)
 
-@lru_cache
-def translated_valid_actions(index, board):
-    """List of translated valid moves on the big board."""
-    return list(map(to_big(index), get_valid_actions(board)))
+TRANSLATED_VALID_ACTIONS = {
+    index: {
+        board: list(map(to_big(index), VALID_ACTIONS[board]))
+        for board in range(0b000000000, 0b1000000000)
+    } for index in range(9)
+}
+
+def win(state):
+    """Returns whether state is a win."""
+    return lambda win: ((win & state) == win)
+HAS_WON = {
+    state: any(map(win(state), WINS))
+    for state in range(0b000000000, 0b1000000000)
+}
+IS_TERMINAL = {
+    player_1: {
+        player_2: HAS_WON[player_1] \
+            or HAS_WON[player_2] \
+            or (player_1 | player_2) == 0b111111111
+        for player_2 in range(0b000000000, 0b1000000000)
+    }
+    for player_1 in range(0b000000000, 0b1000000000)
+}
 
 C = 1.41
 @lru_cache
@@ -284,26 +300,31 @@ class MonteCarloNode(ABC):
 
     def __init__(self, parent:MonteCarloNode = None) -> None:
         self.visited_count = 0
-        self._wins_score = 0
-        self._loses_score = 0
+        self.score = 0
+        self._last_utc_calc_visit_count = -5
+        self._last_child_calc_visit_count = -5
+        self._utc = 0
         self.parent = parent
         self.unvisited_actions = []
         self.children = {}
-
-    @property
-    def score(self) -> int:
-        """Return the score of this Node."""
-        return self._wins_score - self._loses_score
+        self._best_child = None
 
     @property
     def utc(self) -> float:
         """Return hopefully cached UTC."""
-        return calculate_utc(self.score, self.visited_count, self.parent.visited_count)
+        if self._last_utc_calc_visit_count < self.visited_count:
+            self._last_utc_calc_visit_count = self.visited_count
+            self._utc = calculate_utc(self.score, self.visited_count, self.parent.visited_count)
+        return self._utc
 
     @property
     def best_child(self) -> MonteCarloNode:
         """Select the node with currently the highest utc value."""
-        return self.children[max(self.children, key=lambda key: self.children[key].utc)]
+        if self._best_child is None or self._last_child_calc_visit_count < self.visited_count:
+            self._last_child_calc_visit_count = self.visited_count
+            self._best_child = \
+                self.children[max(self.children, key=lambda key: self.children[key].utc)]
+        return self._best_child
 
     @property
     @abstractmethod
@@ -335,27 +356,27 @@ class MonteCarloNode(ABC):
     def simulate(self) -> bool:
         """Complete one playout."""
 
-    def backpropagate(self, winning:bool) -> None:
+    def backpropagate(self, winning:bool, taken_boards: int) -> None:
         """Use the result of the simulation to update information
         in the Nodes on the from the Child Node to the root Node.
 
         """
         self.visited_count += 1
         if winning:
-            self._wins_score += 1
+            self.score += 20 + taken_boards
         else:
-            self._loses_score += 1
+            self.score -= 20 + taken_boards
         if self.parent:
-            self.parent.backpropagate(not winning)
+            self.parent.backpropagate(not winning, taken_boards)
 
     def run(self, run_time: float) -> None:
         """Run simulations until we run out of run_time"""
-        count = 0
+        # count = 0
         begin = datetime.datetime.now()
         while (datetime.datetime.now() - begin).total_seconds() < run_time:
             self.select_leaf().simulate()
-            count += 1
-        print(str(count), file=sys.stderr, flush = True)
+        #     count += 1
+        # print(str(count), file=sys.stderr, flush = True)
 
 
 class UltimateBoard(MonteCarloNode):
@@ -369,13 +390,13 @@ class UltimateBoard(MonteCarloNode):
 
         self.is_player_1 = is_player_1
         if parent is None:
-            self._grid_player_1 = np.array([0b000000000 for _ in range(9)])
-            self._grid_player_2 = np.array([0b000000000 for _ in range(9)])
+            self._grid_player_1 = [0b000000000 for _ in range(9)]
+            self._grid_player_2 = [0b000000000 for _ in range(9)]
             self._player_1 = 0b000000000
             self._player_2 = 0b000000000
         else:
-            self._grid_player_1 = np.array(parent._grid_player_1)
-            self._grid_player_2 = np.array(parent._grid_player_2)
+            self._grid_player_1 = parent._grid_player_1[:]
+            self._grid_player_2 = parent._grid_player_2[:]
             self._player_1 = parent._player_1
             self._player_2 = parent._player_2
 
@@ -388,17 +409,17 @@ class UltimateBoard(MonteCarloNode):
 
         if self.move is not None:
             index = SMALL_TO_BIG[self.move[1]]
-            if not is_terminal(self._grid_player_1[index], self._grid_player_2[index]):
-                valid_actions = translated_valid_actions(index,
-                    self._grid_player_1[index] | self._grid_player_2[index]
-                )
-
+            if not IS_TERMINAL[self._grid_player_1[index]][self._grid_player_2[index]]:
+                valid_actions = \
+                    TRANSLATED_VALID_ACTIONS[index]\
+                        [self._grid_player_1[index] | self._grid_player_2[index]]
         if not valid_actions:
-            for playable_board in get_valid_actions(self._player_1 | self._player_2):
+            for playable_board in VALID_ACTIONS[self._player_1 | self._player_2]:
                 index = SMALL_TO_BIG[playable_board]
-                valid_actions.extend(translated_valid_actions(index,
-                    self._grid_player_1[index] | self._grid_player_2[index]
-                ))
+                valid_actions.extend(
+                    TRANSLATED_VALID_ACTIONS[index]\
+                        [self._grid_player_1[index] | self._grid_player_2[index]]
+                )
 
         return valid_actions
 
@@ -407,21 +428,21 @@ class UltimateBoard(MonteCarloNode):
 
         if self.is_player_1:
             self._grid_player_1[self.move[0]] |= self.move[1]
-            if has_won(self._grid_player_1[self.move[0]]):
+            if HAS_WON[self._grid_player_1[self.move[0]]]:
                 self._player_1 |= BIG_TO_SMALL[self.move[0]]
                 self._grid_player_1[self.move[0]] = 0b111111111
                 self._grid_player_2[self.move[0]] = 0b000000000
 
         else:
             self._grid_player_2[self.move[0]] |= self.move[1]
-            if has_won(self._grid_player_2[self.move[0]]):
+            if HAS_WON[self._grid_player_2[self.move[0]]]:
                 self._player_2 |= BIG_TO_SMALL[self.move[0]]
                 self._grid_player_1[self.move[0]] = 0b000000000
                 self._grid_player_2[self.move[0]] = 0b111111111
 
     @property
     def is_terminal(self):
-        return is_terminal(self._player_1, self._player_2)
+        return IS_TERMINAL[self._player_1][self._player_2]
 
     def expand(self):
         actions = self.get_valid_actions()
@@ -439,13 +460,15 @@ class UltimateBoard(MonteCarloNode):
             actions = simulation_board.get_valid_actions()
             if not actions:
                 break
-            simulation_board.move = choice(actions)
+            simulation_board.move = actions[get_randomint(len(actions))]
             simulation_board.play()
             simulation_board.is_player_1 = not simulation_board.is_player_1
 
         self.backpropagate(
-            has_won(self._player_1) if self.is_player_1 \
-                else has_won(self._player_2)
+            HAS_WON[self._player_1] if self.is_player_1 \
+                else HAS_WON[self._player_2],
+            9-len(VALID_ACTIONS[self._player_1]) if self.is_player_1 \
+                else 9-len(VALID_ACTIONS[self._player_2])
         )
 
     def print_move(self):
@@ -487,9 +510,9 @@ def main():
             root.expand()
 
         if root.is_terminal or not root.children:
-            if has_won(root._player_1):
+            if HAS_WON[root._player_1]:
                 print("player 1 has won")
-            elif has_won(root._player_2):
+            elif HAS_WON[root._player_2]:
                 print("player 2 has won")
             else:
                 print("draw")
@@ -501,4 +524,4 @@ def main():
         root.parent = None
         root.print_move()
 
-#main()
+# main()
