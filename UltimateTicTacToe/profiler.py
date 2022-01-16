@@ -1,7 +1,6 @@
 """Profiler"""
 import cProfile
-import bot
+import new_bot as bot
 
-prof = cProfile.run("bot.main()", 'stats')
+cProfile.run("bot.main()", 'stats')
 
-prof.print_stats()

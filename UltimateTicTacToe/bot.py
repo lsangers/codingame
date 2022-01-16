@@ -2,6 +2,7 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 import datetime
+from functools import lru_cache
 from math import log
 from random import choice, shuffle
 
@@ -89,6 +90,23 @@ class MonteCarloNode(ABC):
         #    iter += 1
         #print(str(iter))
 
+@lru_cache
+def get_valid_actions(grid: tuple[int]) -> list[Action]:
+    """List of valid moves on this grid."""
+    valid_actions = []
+    for y_coord in range(3):
+        for x_coord in range(3):
+            if grid[y_coord*3 + x_coord] == 0:
+                valid_actions.append(Action(x_coord, y_coord, 0))
+    return valid_actions
+
+def translate_action(action: Action, base_x: int, base_y:int, current_player:int) -> Action:
+    """Translate the Action to take the big board into consideration"""
+    action.x_coord += base_x
+    action.y_coord += base_y
+    action.player = current_player
+    return action
+
 class Action:
     """Class for TicTacToe actions."""
     def __init__(self, x_coord: int, y_coord: int, player: int) -> None:
@@ -118,19 +136,6 @@ class NormalBoard:
             self._grid = normal_board._grid[:]
             self._moves_count = normal_board._moves_count
             self.local_winner = normal_board.local_winner
-
-
-    def get_valid_actions(self, current_player:int, base_x:int = 0, base_y:int = 0) -> list[Action]:
-        """List of valid moves on this board."""
-        if self.local_winner != 0:
-            return []
-
-        valid_actions = []
-        for y_coord in range(3):
-            for x_coord in range(3):
-                if self._grid[y_coord*3 + x_coord] == 0:
-                    valid_actions.append(Action(base_x + x_coord, base_y + y_coord, current_player))
-        return valid_actions
 
     def play(self, move: Action, *, localize:bool = False) -> int:
         """Play a given move on this board."""
@@ -200,28 +205,31 @@ class UltimateBoard(MonteCarloNode):
     def get_valid_actions(self) -> list[Action]:
         """List of valid moves on this board."""
         valid_actions = []
+        current_player = 1 if self.last_move.player != 1 else 2
         if self.last_move is not None:
             x_grid = self.last_move.x_coord % 3
             y_grid = self.last_move.y_coord % 3
             board = self._grid[y_grid*3 + x_grid]
             if board.local_winner == 0:
-                valid_actions = board.get_valid_actions(
-                    1 if self.last_move.player != 1 else 2,
+                valid_actions = list(map(lambda action: translate_action(action,
                     x_grid*3,
-                    y_grid*3
-                )
+                    y_grid*3,
+                    current_player
+                    ), get_valid_actions(tuple(board._grid[:]))
+                ))
 
         if not valid_actions:
             position: int
             board: NormalBoard
             for position, board in enumerate(self._grid):
+                x_grid = position % 3
+                y_grid = position // 3
                 if board.local_winner == 0:
-                    valid_actions.extend(
-                        board.get_valid_actions(
-                            1 if self.last_move.player != 1 else 2,
-                            (position%3)*3,
-                            (position//3)*3
-                        )
+                    valid_actions.extend(list(map(lambda action: translate_action(action,
+                            position,#TODO: make actions use the position and make it a move in the print
+                            current_player
+                            ), get_valid_actions(tuple(board._grid[:]))
+                        ))
                     )
 
         return valid_actions
@@ -297,10 +305,10 @@ class UltimateBoard(MonteCarloNode):
         while not simulation_board.is_terminal:
             try:
                 simulation_board.play(choice(simulation_board.get_valid_actions()))
-            except:
+            except(KeyError):
                 print(simulation_board.get_valid_actions())
-                for nb in self._grid:
-                    print(nb._grid)
+                for board in self._grid:
+                    print(board._grid)
 
         self.backpropagate(simulation_board.local_winner in [self.last_move.player])
 
