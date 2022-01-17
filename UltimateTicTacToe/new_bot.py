@@ -7,18 +7,18 @@ from math import log
 from random import randrange, shuffle
 import sys
 
-RAND_INDEX = 0
-RANDOM_MOVES = [
-    randrange(0, 1000) for _ in range(1000)
-]
-def get_randomint(max_val):
-    global RAND_INDEX
-    res = (RANDOM_MOVES[RAND_INDEX])%max_val
-    RAND_INDEX += 1
-    if RAND_INDEX > 999:
-        shuffle(RANDOM_MOVES)
-        RAND_INDEX = 0
-    return res
+# RAND_INDEX = 0
+# RANDOM_MOVES = [
+#     randrange(0, 1000) for _ in range(1000)
+# ]
+# def get_randomint(max_val):
+#     global RAND_INDEX
+#     res = (RANDOM_MOVES[RAND_INDEX])%max_val
+#     RAND_INDEX += 1
+#     if RAND_INDEX > 999:
+#         shuffle(RANDOM_MOVES)
+#         RAND_INDEX = 0
+#     return res
 
 MOVES = [
     0b000000001,
@@ -300,7 +300,7 @@ class MonteCarloNode(ABC):
     """Base class for a Monte Carlo Tree Search state"""
 
     def __init__(self, parent:MonteCarloNode = None) -> None:
-        self.visited_count = 0
+        self.visited_count = 1
         self.score = 0
         self._last_utc_calc_visit_count = -5
         self._last_child_calc_visit_count = -5
@@ -318,18 +318,11 @@ class MonteCarloNode(ABC):
             self._utc = calculate_utc(self.score, self.visited_count, self.parent.visited_count)
         return self._utc
 
-    @property
-    @abstractmethod
-    def is_terminal(self):
-        """Returns whether this node is terminal."""
-
     def select_leaf(self) -> MonteCarloNode:
         """Select a Leaf Node for the next iterations.
         Note: if fully expanded is recursive!
 
         """
-        if self.is_terminal:
-            return self
         if not self.children:
             self.expand()
             if not self.unvisited_actions:
@@ -337,9 +330,9 @@ class MonteCarloNode(ABC):
             shuffle(self.unvisited_actions)
 
         if self.unvisited_actions:
-            self.sorted_actions.insert(0, (0, self.unvisited_actions.pop()))
-            return self.children[self.sorted_actions[0][1]]
-        return self.children[self.sorted_actions[0][1]].select_leaf()
+            self.sorted_actions.insert(0, self.unvisited_actions.pop())
+            return self.children[self.sorted_actions[0]]
+        return self.children[self.sorted_actions[0]].select_leaf()
 
     @abstractmethod
     def expand(self):
@@ -349,42 +342,46 @@ class MonteCarloNode(ABC):
     def simulate(self) -> bool:
         """Complete one playout."""
 
-    def backpropagate(self, winning:bool, taken_boards: int) -> None:
+    def backpropagate(self, winning:bool, turn_counter: int) -> None:
         """Use the result of the simulation to update information
         in the Nodes on the from the Child Node to the root Node.
 
         """
         self.visited_count += 1
         if winning:
-            self.score += (20 + taken_boards)
+            self.score += 1 + 1/turn_counter
         else:
-            self.score -= (20 + taken_boards)
+            self.score -= 1 + 1/turn_counter
         if self.parent:
-            self.parent.backpropagate(not winning, taken_boards)
+            if self.parent.parent:
+                self.parent.backpropagate(not winning, turn_counter)
             if self.sorted_actions:
                 self.update_sorted_actions()
 
     def update_sorted_actions(self):
         """Update the sorted list of actions"""
         utc = self.utc
-        tmp_move = self.sorted_actions[0][1]
-        for pos in range(1, len(self.sorted_actions)):
-            if self.sorted_actions[pos][0] > utc:
-                self.sorted_actions[pos-1] = self.sorted_actions[pos]
+        sorted_actions = self.parent.sorted_actions
+        tmp_move = sorted_actions[0]
+        for pos in range(1, len(sorted_actions)):
+            if self.parent.children[sorted_actions[pos]].utc > utc:
+                sorted_actions[pos-1] = sorted_actions[pos]
             else:
                 if pos > 1:
-                    self.sorted_actions[pos-1] = (utc, tmp_move)
+                    sorted_actions[pos-1] = tmp_move
+                else:
+                    sorted_actions[0] = tmp_move
                 break
 
 
     def run(self, run_time: float) -> None:
         """Run simulations until we run out of run_time"""
-        count = 0
+        # count = 0
         begin = datetime.datetime.now()
         while (datetime.datetime.now() - begin).total_seconds() < run_time:
             self.select_leaf().simulate()
-            count += 1
-        print(str(count), file=sys.stderr, flush = True)
+        #     count += 1
+        # print(str(count), file=sys.stderr, flush = True)
 
 
 class UltimateBoard(MonteCarloNode):
@@ -448,10 +445,6 @@ class UltimateBoard(MonteCarloNode):
                 self._grid_player_1[self.move[0]] = 0b000000000
                 self._grid_player_2[self.move[0]] = 0b111111111
 
-    @property
-    def is_terminal(self):
-        return IS_TERMINAL[self._player_1][self._player_2]
-
     def expand(self):
         actions = self.get_valid_actions()
 
@@ -464,19 +457,20 @@ class UltimateBoard(MonteCarloNode):
 
     def simulate(self):
         simulation_board = UltimateBoard(self.is_player_1, self.move, self.parent)
-        while not simulation_board.is_terminal:
+        turn_counter = 1
+        while not IS_TERMINAL[self._player_1][self._player_2]:
+            turn_counter += 1
             actions = simulation_board.get_valid_actions()
             if not actions:
                 break
-            simulation_board.move = actions[get_randomint(len(actions))]
+            simulation_board.move = actions[randrange(0, len(actions))]
             simulation_board.play()
             simulation_board.is_player_1 = not simulation_board.is_player_1
 
         self.backpropagate(
             HAS_WON[self._player_1] if self.is_player_1 \
                 else HAS_WON[self._player_2],
-            9-len(VALID_ACTIONS[self._player_1]) if self.is_player_1 \
-                else 9-len(VALID_ACTIONS[self._player_2])
+            turn_counter
         )
 
     def print_move(self):
@@ -502,7 +496,7 @@ def main():
     else:
         root = UltimateBoard(False, STRING_TO_ACTION[opponent], None)
         root.run(.99)
-        root = root.children[root.sorted_actions[0][1]]
+        root = root.children[root.sorted_actions[0]]
         root.parent = None
         root.print_move()
 
@@ -517,7 +511,7 @@ def main():
         if not root.children:
             root.expand()
 
-        if root.is_terminal or not root.children:
+        if not root.children:
             if HAS_WON[root._player_1]:
                 print("player 1 has won")
             elif HAS_WON[root._player_2]:
@@ -527,8 +521,8 @@ def main():
             return
 
         # root = root.children[STRING_TO_ACTION[opponent]]
-        root.run(.09)
-        root = root.children[root.sorted_actions[0][1]]
+        root.run(.08)
+        root = root.children[root.sorted_actions[0]]
         root.parent = None
         root.print_move()
 
