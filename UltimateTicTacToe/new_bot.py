@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 import datetime
 from functools import lru_cache
 from math import log
-from random import randrange, shuffle
+from random import choice, randrange, shuffle
 import sys
 
 # RAND_INDEX = 0
@@ -255,6 +255,10 @@ VALID_ACTIONS = {
     board: list(filter(won(board), MOVES))
     for board in range(0b000000000, 0b1000000000)
 }
+VALID_ACTIONS_LEN = {
+    board: len(actions)
+    for board, actions in VALID_ACTIONS.items()
+}
 @lru_cache
 def to_big(index):
     """Returns lambda to translate small to big move."""
@@ -286,7 +290,7 @@ IS_TERMINAL = {
 
 C = 1.41
 @lru_cache
-def calculate_utc(score: int, visited_count: int, parent_visited_count: int) -> float:
+def calculate_utc(score: int, visited_count: int, parent_visited_count: int, parent_children_count: int) -> float:
     """Return the UTC value of this node.
     Based on: https://en.wikipedia.org/wiki/Monte_Carlo_tree_search
     Section Exploration and exploitation.
@@ -294,7 +298,7 @@ def calculate_utc(score: int, visited_count: int, parent_visited_count: int) -> 
     """
     visited_count = visited_count if visited_count else 1
     return (score/visited_count) \
-            + C * (log(parent_visited_count)/visited_count)**.5
+            + (parent_children_count*log(parent_visited_count)/visited_count)**.5
 
 class MonteCarloNode(ABC):
     """Base class for a Monte Carlo Tree Search state"""
@@ -307,16 +311,25 @@ class MonteCarloNode(ABC):
         self._utc = 0
         self.parent = parent
         self.unvisited_actions = []
-        self.sorted_actions = []
+        self._best_child = None
         self.children = {}
+        self.children_count = 0
 
     @property
     def utc(self) -> float:
         """Return hopefully cached UTC."""
         if self._last_utc_calc_visit_count < self.visited_count:
             self._last_utc_calc_visit_count = self.visited_count
-            self._utc = calculate_utc(self.score, self.visited_count, self.parent.visited_count)
+            self._utc = calculate_utc(self.score, self.visited_count, self.parent.visited_count, self.children_count)
         return self._utc
+    @property
+    def best_child(self) -> MonteCarloNode:
+        """Select the node with currently the highest utc value."""
+        if self._best_child is None or self._last_child_calc_visit_count < self.visited_count:
+            self._last_child_calc_visit_count = self.visited_count
+            self._best_child = \
+                self.children[max(self.children, key=lambda key: self.children[key].utc)]
+        return self._best_child
 
     def select_leaf(self) -> MonteCarloNode:
         """Select a Leaf Node for the next iterations.
@@ -330,9 +343,8 @@ class MonteCarloNode(ABC):
             shuffle(self.unvisited_actions)
 
         if self.unvisited_actions:
-            self.sorted_actions.insert(0, self.unvisited_actions.pop())
-            return self.children[self.sorted_actions[0]]
-        return self.children[self.sorted_actions[0]].select_leaf()
+            return self.children[self.unvisited_actions.pop()]
+        return self.best_child.select_leaf()
 
     @abstractmethod
     def expand(self):
@@ -342,44 +354,28 @@ class MonteCarloNode(ABC):
     def simulate(self) -> bool:
         """Complete one playout."""
 
-    def backpropagate(self, winning:bool, turn_counter: int) -> None:
+    def backpropagate(self, winning:bool, draw:bool, turn_counter: int) -> None:
         """Use the result of the simulation to update information
         in the Nodes on the from the Child Node to the root Node.
 
         """
         self.visited_count += 1
         if winning:
-            self.score += 1 + 1/turn_counter
-        else:
-            self.score -= 1 + 1/turn_counter
+            self.score += 1
+        elif draw:
+             self.score += .1
         if self.parent:
             if self.parent.parent:
-                self.parent.backpropagate(not winning, turn_counter)
-            if self.sorted_actions:
-                self.update_sorted_actions()
-
-    def update_sorted_actions(self):
-        """Update the sorted list of actions"""
-        utc = self.utc
-        sorted_actions = self.parent.sorted_actions
-        tmp_move = sorted_actions[0]
-        for pos in range(1, len(sorted_actions)):
-            if self.parent.children[sorted_actions[pos]].utc > utc:
-                sorted_actions[pos-1] = sorted_actions[pos]
-            else:
-                if pos > 1:
-                    sorted_actions[pos-1] = tmp_move
-                else:
-                    sorted_actions[0] = tmp_move
-                break
-
+                self.parent.backpropagate(not winning, draw, turn_counter)
 
     def run(self, run_time: float) -> None:
         """Run simulations until we run out of run_time"""
         # count = 0
         begin = datetime.datetime.now()
         while (datetime.datetime.now() - begin).total_seconds() < run_time:
-            self.select_leaf().simulate()
+            selected = self.select_leaf()
+            for _ in range(10):
+                selected.simulate()
         #     count += 1
         # print(str(count), file=sys.stderr, flush = True)
 
@@ -454,6 +450,7 @@ class UltimateBoard(MonteCarloNode):
             child_node = UltimateBoard(not self.is_player_1, action, self)
             self.unvisited_actions.append(action)
             self.children[action] = child_node
+        self.children_count = len(actions)
 
     def simulate(self):
         simulation_board = UltimateBoard(self.is_player_1, self.move, self.parent)
@@ -463,13 +460,17 @@ class UltimateBoard(MonteCarloNode):
             actions = simulation_board.get_valid_actions()
             if not actions:
                 break
-            simulation_board.move = actions[randrange(0, len(actions))]
+            simulation_board.move = choice(actions)
             simulation_board.play()
             simulation_board.is_player_1 = not simulation_board.is_player_1
 
         self.backpropagate(
-            HAS_WON[self._player_1] if self.is_player_1 \
-                else HAS_WON[self._player_2],
+            HAS_WON[self._player_1] \
+                    or VALID_ACTIONS_LEN[self._player_1] < VALID_ACTIONS_LEN[self._player_2] \
+                if self.is_player_1 \
+                else HAS_WON[self._player_2] \
+                    or VALID_ACTIONS_LEN[self._player_1] > VALID_ACTIONS_LEN[self._player_2],
+            VALID_ACTIONS_LEN[self._player_1] == VALID_ACTIONS_LEN[self._player_2],
             turn_counter
         )
 
@@ -496,34 +497,34 @@ def main():
     else:
         root = UltimateBoard(False, STRING_TO_ACTION[opponent], None)
         root.run(.99)
-        root = root.children[root.sorted_actions[0]]
+        root = root.best_child
         root.parent = None
         root.print_move()
 
 
     #game loop
     while True:
-        # opponent = input()
-        # valid_action_count = int(input())
-        # for _ in range(valid_action_count):
-        #     _, _ = [int(j) for j in input().split()]
+        opponent = input()
+        valid_action_count = int(input())
+        for _ in range(valid_action_count):
+            _, _ = [int(j) for j in input().split()]
 
         if not root.children:
             root.expand()
 
-        if not root.children:
-            if HAS_WON[root._player_1]:
-                print("player 1 has won")
-            elif HAS_WON[root._player_2]:
-                print("player 2 has won")
-            else:
-                print("draw")
-            return
+        # if not root.children:
+        #     if HAS_WON[root._player_1]:
+        #         print("player 1 has won")
+        #     elif HAS_WON[root._player_2]:
+        #         print("player 2 has won")
+        #     else:
+        #         print("draw")
+        #     return
 
-        # root = root.children[STRING_TO_ACTION[opponent]]
+        root = root.children[STRING_TO_ACTION[opponent]]
         root.run(.08)
-        root = root.children[root.sorted_actions[0]]
+        root = root.best_child
         root.parent = None
         root.print_move()
 
-# main()
+main()
