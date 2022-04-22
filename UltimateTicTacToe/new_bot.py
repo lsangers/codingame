@@ -3,8 +3,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import datetime
 from functools import lru_cache
-from math import log
-from random import choice, randrange, shuffle
+from math import log, sqrt
+from random import choice, shuffle
 import sys
 
 # RAND_INDEX = 0
@@ -259,7 +259,6 @@ VALID_ACTIONS_LEN = {
     board: len(actions)
     for board, actions in VALID_ACTIONS.items()
 }
-@lru_cache
 def to_big(index):
     """Returns lambda to translate small to big move."""
     return lambda action: (index, action)
@@ -288,243 +287,252 @@ IS_TERMINAL = {
     for player_1 in range(0b000000000, 0b1000000000)
 }
 
-C = 1.41
+C = .6
 @lru_cache
-def calculate_utc(score: int, visited_count: int, parent_visited_count: int, parent_children_count: int) -> float:
+def calculate_utc(score: int, visited_count: int, parent_visited_count: int) -> float:
     """Return the UTC value of this node.
     Based on: https://en.wikipedia.org/wiki/Monte_Carlo_tree_search
     Section Exploration and exploitation.
 
     """
-    visited_count = visited_count if visited_count else 1
     return (score/visited_count) \
-            + (parent_children_count*log(parent_visited_count)/visited_count)**.5
+            + C * sqrt(log(parent_visited_count)/visited_count)
 
-class MonteCarloNode(ABC):
-    """Base class for a Monte Carlo Tree Search state"""
+def get_valid_actions(move, grid_player_1, grid_player_2, player_1, player_2) -> list[tuple[int, int]]:
+    """List of valid moves on this board."""
+    valid_actions = []
 
-    def __init__(self, parent:MonteCarloNode = None) -> None:
+    if move is not None:
+        index = SMALL_TO_BIG[move[1]]
+        if not IS_TERMINAL[grid_player_1[index]][grid_player_2[index]]:
+            valid_actions.extend(TRANSLATED_VALID_ACTIONS[index]\
+                [grid_player_1[index] | grid_player_2[index]])
+
+    if not valid_actions:
+        for playable_board in VALID_ACTIONS[player_1 | player_2]:
+            index = SMALL_TO_BIG[playable_board]
+            valid_actions.extend(
+                TRANSLATED_VALID_ACTIONS[index]\
+                    [grid_player_1[index] | grid_player_2[index]]
+            )
+
+    return valid_actions
+
+class UltimateBoard():
+    """Class for Ultimate TicTacToe board."""
+    def __init__(self,
+            is_player_1: bool = False,
+            move: tuple[int, int] = None,
+            parent: UltimateBoard = None
+        ) -> None:
         self.visited_count = 1
         self.score = 0
-        self._last_utc_calc_visit_count = -5
-        self._last_child_calc_visit_count = -5
-        self._utc = 0
         self.parent = parent
         self.unvisited_actions = []
-        self._best_child = None
         self.children = {}
-        self.children_count = 0
+        self.children_refs = []
+
+        self.is_player_1 = is_player_1
+        if parent is None:
+            self.grid_player_1 = [0b000000000 for _ in range(9)]
+            self.grid_player_2 = [0b000000000 for _ in range(9)]
+            self.player_1 = 0b000000000
+            self.player_2 = 0b000000000
+        else:
+            self.grid_player_1 = parent.grid_player_1[:]
+            self.grid_player_2 = parent.grid_player_2[:]
+            self.player_1 = parent.player_1
+            self.player_2 = parent.player_2
+
+        self.move = move
+        if self.is_player_1:
+            self.grid_player_1[self.move[0]] |= self.move[1]
+            if HAS_WON[self.grid_player_1[self.move[0]]]:
+                self.player_1 |= BIG_TO_SMALL[self.move[0]]
+
+        else:
+            self.grid_player_2[self.move[0]] |= self.move[1]
+            if HAS_WON[self.grid_player_2[self.move[0]]]:
+                self.player_2 |= BIG_TO_SMALL[self.move[0]]
 
     @property
     def utc(self) -> float:
         """Return hopefully cached UTC."""
-        if self._last_utc_calc_visit_count < self.visited_count:
-            self._last_utc_calc_visit_count = self.visited_count
-            self._utc = calculate_utc(self.score, self.visited_count, self.parent.visited_count, self.children_count)
-        return self._utc
+        return calculate_utc(self.score, self.visited_count, self.parent.visited_count)
     @property
-    def best_child(self) -> MonteCarloNode:
+    def next_child(self) -> UltimateBoard:
         """Select the node with currently the highest utc value."""
-        if self._best_child is None or self._last_child_calc_visit_count < self.visited_count:
-            self._last_child_calc_visit_count = self.visited_count
-            self._best_child = \
-                self.children[max(self.children, key=lambda key: self.children[key].utc)]
-        return self._best_child
+        return max(self.children_refs, key=lambda child: child.utc)
+    @property
+    def best_child(self) -> UltimateBoard:
+        """Select the node with currently the highest score per visit."""
+        return max(self.children_refs, key=lambda child: child.visited_count)
 
-    def select_leaf(self) -> MonteCarloNode:
-        """Select a Leaf Node for the next iterations.
-        Note: if fully expanded is recursive!
-
-        """
-        if not self.children:
-            self.expand()
-            if not self.unvisited_actions:
-                return self
-            shuffle(self.unvisited_actions)
-
-        if self.unvisited_actions:
-            return self.children[self.unvisited_actions.pop()]
-        return self.best_child.select_leaf()
-
-    @abstractmethod
-    def expand(self):
-        """Create all Child Nodes."""
-
-    @abstractmethod
-    def simulate(self) -> bool:
-        """Complete one playout."""
-
-    def backpropagate(self, winning:bool, draw:bool, turn_counter: int) -> None:
-        """Use the result of the simulation to update information
-        in the Nodes on the from the Child Node to the root Node.
-
-        """
-        self.visited_count += 1
-        if winning:
-            self.score += 1
-        elif draw:
-             self.score += .1
-        if self.parent:
-            if self.parent.parent:
-                self.parent.backpropagate(not winning, draw, turn_counter)
-
-    def run(self, run_time: float) -> None:
-        """Run simulations until we run out of run_time"""
-        # count = 0
-        begin = datetime.datetime.now()
-        while (datetime.datetime.now() - begin).total_seconds() < run_time:
-            selected = self.select_leaf()
-            for _ in range(10):
-                selected.simulate()
-        #     count += 1
-        # print(str(count), file=sys.stderr, flush = True)
-
-
-class UltimateBoard(MonteCarloNode):
-    """Class for Ultimate TicTacToe board."""
-    def __init__(self,
-            is_player_1: bool = False,
-            move: tuple[int] = None,
-            parent: UltimateBoard = None
-        ) -> None:
-        super().__init__(parent)
-
-        self.is_player_1 = is_player_1
-        if parent is None:
-            self._grid_player_1 = [0b000000000 for _ in range(9)]
-            self._grid_player_2 = [0b000000000 for _ in range(9)]
-            self._player_1 = 0b000000000
-            self._player_2 = 0b000000000
-        else:
-            self._grid_player_1 = parent._grid_player_1[:]
-            self._grid_player_2 = parent._grid_player_2[:]
-            self._player_1 = parent._player_1
-            self._player_2 = parent._player_2
-
-        self.move = move
-        self.play()
-
-    def get_valid_actions(self) -> list[tuple[int]]:
+    def get_valid_actions(self) -> list[tuple[int, int]]:
         """List of valid moves on this board."""
         valid_actions = []
 
         if self.move is not None:
             index = SMALL_TO_BIG[self.move[1]]
-            if not IS_TERMINAL[self._grid_player_1[index]][self._grid_player_2[index]]:
-                valid_actions = \
-                    TRANSLATED_VALID_ACTIONS[index]\
-                        [self._grid_player_1[index] | self._grid_player_2[index]]
+            if not IS_TERMINAL[self.grid_player_1[index]][self.grid_player_2[index]]:
+                valid_actions.extend(TRANSLATED_VALID_ACTIONS[index]\
+                        [self.grid_player_1[index] | self.grid_player_2[index]][:])
+
         if not valid_actions:
-            for playable_board in VALID_ACTIONS[self._player_1 | self._player_2]:
+            for playable_board in VALID_ACTIONS[self.player_1 | self.player_2]:
                 index = SMALL_TO_BIG[playable_board]
                 valid_actions.extend(
                     TRANSLATED_VALID_ACTIONS[index]\
-                        [self._grid_player_1[index] | self._grid_player_2[index]]
+                        [self.grid_player_1[index] | self.grid_player_2[index]]
                 )
 
         return valid_actions
 
-    def play(self) -> None:
-        """Play a given move on this board."""
 
-        if self.is_player_1:
-            self._grid_player_1[self.move[0]] |= self.move[1]
-            if HAS_WON[self._grid_player_1[self.move[0]]]:
-                self._player_1 |= BIG_TO_SMALL[self.move[0]]
-                self._grid_player_1[self.move[0]] = 0b111111111
-                self._grid_player_2[self.move[0]] = 0b000000000
+    def run(self, run_time: float) -> None:
+        """Run simulations until we run out of run_time"""
+        count = 0
+        begin = datetime.datetime.now()
+        while (datetime.datetime.now() - begin).total_seconds() < run_time:
+            #selection
+            node = self
+            while True:
+                if not node.unvisited_actions and not node.children:
+                    node.unvisited_actions.extend(node.get_valid_actions())
+                    if not node.unvisited_actions:
+                        break
+                    shuffle(node.unvisited_actions)
 
-        else:
-            self._grid_player_2[self.move[0]] |= self.move[1]
-            if HAS_WON[self._grid_player_2[self.move[0]]]:
-                self._player_2 |= BIG_TO_SMALL[self.move[0]]
-                self._grid_player_1[self.move[0]] = 0b000000000
-                self._grid_player_2[self.move[0]] = 0b111111111
+                if node.unvisited_actions:
+                    action = node.unvisited_actions.pop()
+                    node.children[action] = UltimateBoard(not node.is_player_1, action, node)
+                    node.children_refs.append(node.children[action])
+                    node = node.children[action]
+                    break
+                node = node.next_child
 
-    def expand(self):
-        actions = self.get_valid_actions()
+            #simulation
+            # simulation_board = UltimateBoard(node.is_player_1, node.move, node.parent)
+            player_1_score = 0
+            player_2_score = 0
+            visits = 1
+            depth = 0
+            loc_grid_player_1 = node.grid_player_1[:]
+            loc_grid_player_2 = node.grid_player_2[:]
+            loc_player_1 = node.player_1
+            loc_player_2 = node.player_2
+            loc_is_player_1 = node.is_player_1
+            big_move, small_move = last_move = node.move
+            if loc_is_player_1:
+                loc_grid_player_1[big_move] \
+                    |= small_move
+                if HAS_WON[loc_grid_player_1[big_move]]:
+                    loc_player_1 |= BIG_TO_SMALL[big_move]
+            else:
+                loc_grid_player_2[big_move] \
+                    |= small_move
+                if HAS_WON[loc_grid_player_2[big_move]]:
+                    loc_player_2 |= BIG_TO_SMALL[big_move]
 
-        for action in actions:
-            action = action if isinstance(action, tuple) \
-                else (SMALL_TO_BIG[self.move[1]], action)
-            child_node = UltimateBoard(not self.is_player_1, action, self)
-            self.unvisited_actions.append(action)
-            self.children[action] = child_node
-        self.children_count = len(actions)
 
-    def simulate(self):
-        simulation_board = UltimateBoard(self.is_player_1, self.move, self.parent)
-        turn_counter = 1
-        while not IS_TERMINAL[self._player_1][self._player_2]:
-            turn_counter += 1
-            actions = simulation_board.get_valid_actions()
-            if not actions:
-                break
-            simulation_board.move = choice(actions)
-            simulation_board.play()
-            simulation_board.is_player_1 = not simulation_board.is_player_1
+            while not IS_TERMINAL[loc_player_1][loc_player_2]:
+                depth += 1
+                actions = get_valid_actions(
+                    last_move,
+                    loc_grid_player_1,
+                    loc_grid_player_2,
+                    loc_player_1,
+                    loc_player_2
+                )
+                if not actions:
+                    break
+                big_move, small_move = last_move = choice(actions)
+                # simulation_board.play()
+                if loc_is_player_1:
+                    loc_grid_player_1[big_move] \
+                        |= small_move
+                    if HAS_WON[loc_grid_player_1[big_move]]:
+                        loc_player_1 |= BIG_TO_SMALL[big_move]
+                else:
+                    loc_grid_player_2[big_move] \
+                        |= small_move
+                    if HAS_WON[loc_grid_player_2[big_move]]:
+                        loc_player_2 |= BIG_TO_SMALL[big_move]
+                
+                loc_is_player_1 = not loc_is_player_1
 
-        self.backpropagate(
-            HAS_WON[self._player_1] \
-                    or VALID_ACTIONS_LEN[self._player_1] < VALID_ACTIONS_LEN[self._player_2] \
-                if self.is_player_1 \
-                else HAS_WON[self._player_2] \
-                    or VALID_ACTIONS_LEN[self._player_1] > VALID_ACTIONS_LEN[self._player_2],
-            VALID_ACTIONS_LEN[self._player_1] == VALID_ACTIONS_LEN[self._player_2],
-            turn_counter
-        )
+            if self.is_player_1 == loc_is_player_1:
+                tmp = int(HAS_WON[loc_player_1] \
+                            or VALID_ACTIONS_LEN[loc_player_1] < VALID_ACTIONS_LEN[loc_player_2] \
+                        if loc_is_player_1 \
+                        else HAS_WON[loc_player_2] \
+                            or VALID_ACTIONS_LEN[loc_player_1] > VALID_ACTIONS_LEN[loc_player_2])
+                player_1_score += tmp
+                player_2_score += 1-tmp
+            else:
+                tmp = int(HAS_WON[loc_player_1] \
+                        or VALID_ACTIONS_LEN[loc_player_1] < VALID_ACTIONS_LEN[loc_player_2] \
+                    if not loc_is_player_1 \
+                    else HAS_WON[loc_player_2] \
+                        or VALID_ACTIONS_LEN[loc_player_1] > VALID_ACTIONS_LEN[loc_player_2])
+                player_1_score += tmp
+                player_2_score += 1-tmp
 
-    def print_move(self):
-        """Print the best move to console.
-        Note: They expect first the y coord then the x coord.
-        """
-        print(ACTION_TO_STRING[self.move])
+            #backpropagate
+            while node.parent:
+                node.visited_count += visits
+                node.score += player_1_score if not node.is_player_1 else player_2_score
+                node = node.parent
+
+
+            count += 1
+        print(str(count), file=sys.stderr, flush = True)
 
 def main():
     """Main"""
     #first turn
-    opponent = input()
-    valid_action_count = int(input())
-    for _ in range(valid_action_count):
-        _, valid_action_count = [int(j) for j in input().split()]
+    opponent = '-'#input()
+    # valid_action_count = int(input())
+    # for _ in range(valid_action_count):
+    #     _, _ = [int(j) for j in input().split()]
 
     root = None
 
     if opponent[0] == '-':
-        root = UltimateBoard(True, (0, 0b100000000), None)
+        root = UltimateBoard(True, (4, 0b000010000), None)
         root.run(.99)
-        print("0 0")
+        print("4 4")
     else:
         root = UltimateBoard(False, STRING_TO_ACTION[opponent], None)
         root.run(.99)
         root = root.best_child
         root.parent = None
-        root.print_move()
+        print(ACTION_TO_STRING[root.move])
 
 
     #game loop
     while True:
-        opponent = input()
-        valid_action_count = int(input())
-        for _ in range(valid_action_count):
-            _, _ = [int(j) for j in input().split()]
+        # opponent = input()
+        # valid_action_count = int(input())
+        # for _ in range(valid_action_count):
+        #     _, _ = [int(j) for j in input().split()]
 
-        if not root.children:
-            root.expand()
+        if not root.children and not root.unvisited_actions:
+            root.unvisited_actions.extend(root.get_valid_actions())
 
-        # if not root.children:
-        #     if HAS_WON[root._player_1]:
-        #         print("player 1 has won")
-        #     elif HAS_WON[root._player_2]:
-        #         print("player 2 has won")
-        #     else:
-        #         print("draw")
-        #     return
+        if not root.children and not root.unvisited_actions:
+            if HAS_WON[root.player_1]:
+                print("player 1 has won")
+            elif HAS_WON[root.player_2]:
+                print("player 2 has won")
+            else:
+                print("draw")
+            return
 
-        root = root.children[STRING_TO_ACTION[opponent]]
-        root.run(.08)
+        # root = root.children[STRING_TO_ACTION[opponent]]
+        root.run(.095)
         root = root.best_child
         root.parent = None
-        root.print_move()
+        print(ACTION_TO_STRING[root.move])
 
-main()
+# main()
